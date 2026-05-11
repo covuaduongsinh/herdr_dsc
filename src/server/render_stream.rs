@@ -246,10 +246,6 @@ pub(crate) fn visible_hyperlinks(app_state: &AppState) -> Vec<((u16, u16), Strin
 }
 
 fn focused_terminal_cursor(app_state: &AppState) -> Option<CursorState> {
-    if app_state.mode != Mode::Terminal {
-        return None;
-    }
-
     let ws_idx = app_state.active?;
     let ws = app_state.workspaces.get(ws_idx)?;
     let info = app_state
@@ -262,6 +258,8 @@ fn focused_terminal_cursor(app_state: &AppState) -> Option<CursorState> {
     Some(CursorState {
         x: cursor.x,
         y: cursor.y,
-        visible: cursor.visible && !crate::ui::pane_is_scrolled_back(rt),
+        visible: app_state.mode == Mode::Terminal
+            && cursor.visible
+            && !crate::ui::pane_is_scrolled_back(rt),
     })
 }

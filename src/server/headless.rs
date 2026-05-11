@@ -1963,6 +1963,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn virtual_render_hides_focused_pane_cursor_while_mobile_switcher_open() {
+        let mut state = AppState::test_new();
+        let mut ws = crate::workspace::Workspace::test_new("test");
+        let pane_id = ws.tabs[0].root_pane;
+        ws.tabs[0].runtimes.insert(
+            pane_id,
+            crate::pane::PaneRuntime::test_with_screen_bytes(20, 5, b"left"),
+        );
+
+        state.workspaces = vec![ws];
+        state.active = Some(0);
+        state.selected = 0;
+        state.mode = crate::app::Mode::Navigate;
+
+        let area = Rect::new(0, 0, 44, 24);
+        let (_buffer, cursor) =
+            crate::server::render_stream::render_virtual(&mut state, area, true);
+        let pane = state
+            .view
+            .pane_infos
+            .iter()
+            .find(|info| info.id == pane_id)
+            .expect("focused pane info");
+
+        assert_eq!(
+            cursor,
+            Some(CursorState {
+                x: pane.inner_rect.x + 4,
+                y: pane.inner_rect.y,
+                visible: false,
+            })
+        );
+    }
+
+    #[tokio::test]
     async fn virtual_render_hides_focused_pane_cursor_while_scrolled_back() {
         let mut state = AppState::test_new();
         let mut ws = crate::workspace::Workspace::test_new("test");
