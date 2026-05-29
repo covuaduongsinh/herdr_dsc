@@ -1,14 +1,24 @@
 {
-  "version": "0.6.4",
+  "version": "0.6.5",
   "protocol": 11,
-  "notes": "### Fixed\n- Fixed macOS server startup with large restored sessions by raising the server file descriptor soft limit, preventing new panes from failing with `dup of fd N failed` or `Too many open files` around 40 live panes. (#327)\n\nThis is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.",
+  "notes": "### Added\n- Added pane copy mode at `prefix+[` with keyboard navigation, visual selection, and clipboard yank support. (#231)\n- Added `foreground_cwd` to pane and agent API/CLI responses so integrations can inspect the active foreground process directory without changing the existing pane/workspace `cwd` semantics. (#345)\n- Added read-only `agent_session` metadata to pane and agent API/CLI responses when official integrations report native session references.\n\n### Fixed\n- Live handoff now preserves terminal state when transferring supported running panes to a replacement server.\n- WSL clipboard writes now prefer OSC 52 before WSLg clipboard tools, so mouse selection and double-click copy populate Windows clipboard history in Windows Terminal. (#333)\n- Incomplete host terminal OSC default-color replies no longer get misread as Alt-key input and forwarded into panes, preventing interactive prompts such as `gh auth login --web` from aborting on split `ESC ]` input. (#279, #306, #344)\n- Workspace rename prompts and background notifications now use live cwd-derived workspace labels instead of stale session labels. (#332)\n- `herdr session stop` no longer fails on zero-duration socket timeouts when the stop deadline is nearly exhausted.\n- Update preview instructions now wrap long package-manager commands instead of truncating the shell command suffix.\n- Restored native agent resume panes now fall back to a shell when the resumed agent exits instead of closing the whole pane.",
   "assets": {
-    "linux-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.6.4/herdr-linux-x86_64",
-    "linux-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.6.4/herdr-linux-aarch64",
-    "macos-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.6.4/herdr-macos-x86_64",
-    "macos-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.6.4/herdr-macos-aarch64"
+    "linux-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.6.5/herdr-linux-x86_64",
+    "linux-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.6.5/herdr-linux-aarch64",
+    "macos-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.6.5/herdr-macos-x86_64",
+    "macos-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.6.5/herdr-macos-aarch64"
   },
   "releases": {
+    "0.6.5": {
+      "notes": "### Added\n- Added pane copy mode at `prefix+[` with keyboard navigation, visual selection, and clipboard yank support. (#231)\n- Added `foreground_cwd` to pane and agent API/CLI responses so integrations can inspect the active foreground process directory without changing the existing pane/workspace `cwd` semantics. (#345)\n- Added read-only `agent_session` metadata to pane and agent API/CLI responses when official integrations report native session references.\n\n### Fixed\n- Live handoff now preserves terminal state when transferring supported running panes to a replacement server.\n- WSL clipboard writes now prefer OSC 52 before WSLg clipboard tools, so mouse selection and double-click copy populate Windows clipboard history in Windows Terminal. (#333)\n- Incomplete host terminal OSC default-color replies no longer get misread as Alt-key input and forwarded into panes, preventing interactive prompts such as `gh auth login --web` from aborting on split `ESC ]` input. (#279, #306, #344)\n- Workspace rename prompts and background notifications now use live cwd-derived workspace labels instead of stale session labels. (#332)\n- `herdr session stop` no longer fails on zero-duration socket timeouts when the stop deadline is nearly exhausted.\n- Update preview instructions now wrap long package-manager commands instead of truncating the shell command suffix.\n- Restored native agent resume panes now fall back to a shell when the resumed agent exits instead of closing the whole pane.",
+      "protocol": 11,
+      "assets": {
+        "linux-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.6.5/herdr-linux-x86_64",
+        "linux-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.6.5/herdr-linux-aarch64",
+        "macos-x86_64": "https://github.com/ogulcancelik/herdr/releases/download/v0.6.5/herdr-macos-x86_64",
+        "macos-aarch64": "https://github.com/ogulcancelik/herdr/releases/download/v0.6.5/herdr-macos-aarch64"
+      }
+    },
     "0.6.4": {
       "notes": "### Fixed\n- Fixed macOS server startup with large restored sessions by raising the server file descriptor soft limit, preventing new panes from failing with `dup of fd N failed` or `Too many open files` around 40 live panes. (#327)\n\nThis is a hotfix for v0.6.3. See the v0.6.3 notes for the full feature release.",
       "protocol": 11,
