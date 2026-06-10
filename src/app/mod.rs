@@ -1093,11 +1093,11 @@ impl App {
                     self.state
                         .integration_install_messages
                         .push(format!("installed {label}"));
-                    self.state.integration_install_messages.extend(
-                        messages.into_iter().filter(|message| {
+                    self.state
+                        .integration_install_messages
+                        .extend(messages.into_iter().filter(|message| {
                             message.starts_with(crate::integration::INSTALL_WARNING_PREFIX)
-                        }),
-                    );
+                        }));
                 }
                 Err(err) => self
                     .state

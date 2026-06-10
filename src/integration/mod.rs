@@ -457,9 +457,7 @@ pub(crate) fn install_target(
     result
 }
 
-fn install_target_inner(
-    target: crate::api::schema::IntegrationTarget,
-) -> io::Result<Vec<String>> {
+fn install_target_inner(target: crate::api::schema::IntegrationTarget) -> io::Result<Vec<String>> {
     if !integration_target_supported(target) {
         return Err(io::Error::other(format!(
             "{} integration is not supported on Windows",
@@ -3362,8 +3360,8 @@ mod tests {
             args: &["0.12.1"],
             min_version: "0.14.0",
         };
-        let err = enforce_agent_version(&requirement)
-            .expect_err("old version must fail the install");
+        let err =
+            enforce_agent_version(&requirement).expect_err("old version must fail the install");
         let message = err.to_string();
         assert!(message.contains("0.12.1"));
         assert!(message.contains("0.14.0"));
