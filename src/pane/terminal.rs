@@ -3581,6 +3581,31 @@ mod tests {
     }
 
     #[test]
+    fn ghostty_shift_tab_stays_legacy_without_report_all_keys() {
+        // Regression test: Ghostty's own key encoder collapses BackTab onto
+        // GHOSTTY_KEY_TAB and promotes Shift+Tab to a Kitty CSI-u sequence
+        // as soon as any Kitty flag (even just DISAMBIGUATE) is negotiated.
+        // Some inner apps (e.g. Claude Code on Windows) negotiate basic
+        // disambiguation but only understand the legacy `\x1b[Z` form, so
+        // herdr must route Tab/BackTab through its own encoder instead of
+        // Ghostty's and keep them legacy-compatible here.
+        let (tx, _rx) = mpsc::channel(4);
+        let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();
+        terminal.write(b"\x1b[>1u"); // DISAMBIGUATE only, no REPORT_ALL_KEYS.
+        let pane = GhosttyPaneTerminal::new(terminal, tx).unwrap();
+
+        let encoded = pane.encode_terminal_key(
+            crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::BackTab,
+                crossterm::event::KeyModifiers::SHIFT,
+            ),
+            pane.keyboard_protocol().unwrap(),
+        );
+
+        assert_eq!(encoded, b"\x1b[Z");
+    }
+
+    #[test]
     fn ghostty_char_keys_still_use_herdr_encoding() {
         let (tx, _rx) = mpsc::channel(4);
         let mut terminal = crate::ghostty::Terminal::new(80, 24, 0).unwrap();

@@ -177,6 +177,13 @@ fn try_encode_csi_u(key: &TerminalKey, flags: u16) -> Option<Vec<u8>> {
     // xterm modified formats (\x1b[1;3A for Alt+Up, etc.) that are universally
     // understood. Even Ghostty sends these in legacy format with kitty mode on.
     // Only use CSI u for character keys and keys without legacy representations.
+    //
+    // Tab/BackTab are included here for the same reason: Shift+Tab has a
+    // universally-understood legacy form (`\x1b[Z`, CBT) that predates Kitty,
+    // and some inner apps (e.g. Claude Code on Windows) negotiate basic Kitty
+    // disambiguation but don't parse the CSI-u form of it. Only promote to
+    // CSI-u once the app asks for full key reporting (REPORT_ALL_KEYS) or
+    // event types.
     match key.code {
         KeyCode::Up
         | KeyCode::Down
@@ -188,12 +195,29 @@ fn try_encode_csi_u(key: &TerminalKey, flags: u16) -> Option<Vec<u8>> {
         | KeyCode::PageDown
         | KeyCode::Insert
         | KeyCode::Delete
+        | KeyCode::Tab
+        | KeyCode::BackTab
         | KeyCode::F(_)
             if event_suffix.is_none() && !report_all_keys =>
         {
             return None; // let legacy handle these
         }
         _ => {}
+    }
+
+    // Alt-only modified character keys (e.g. Alt+M) have a universally
+    // understood legacy form too: ESC followed by the character. Some inner
+    // apps rely on this (Claude Code's mode-switch shortcut on Windows is one
+    // example) without understanding the CSI-u equivalent under basic Kitty
+    // flags. Keep this narrowly scoped to plain Alt (no other modifiers) so
+    // apps that do want CSI-u disambiguation for other combinations are
+    // unaffected.
+    if mods == KeyModifiers::ALT
+        && event_suffix.is_none()
+        && !report_all_keys
+        && matches!(key.code, KeyCode::Char(_))
+    {
+        return None; // let legacy ESC-prefix encoding handle this
     }
 
     let (codepoint, alternate_shifted) = match key.code {
@@ -203,7 +227,10 @@ fn try_encode_csi_u(key: &TerminalKey, flags: u16) -> Option<Vec<u8>> {
             (base as u32, shifted)
         }
         KeyCode::Enter => (13, None),
-        KeyCode::Tab => (9, None),
+        // The Kitty protocol has no separate "backtab" codepoint: Shift+Tab
+        // is codepoint 9 (Tab) with the SHIFT modifier bit set, whether it
+        // arrived as `KeyCode::Tab` or `KeyCode::BackTab`.
+        KeyCode::Tab | KeyCode::BackTab => (9, None),
         KeyCode::Backspace => (127, None),
         KeyCode::Esc => (27, None),
         KeyCode::Left => (57417, None),
@@ -478,6 +505,11 @@ fn encode_legacy_inner(key: TerminalKey) -> Vec<u8> {
         }
         KeyCode::Enter => vec![b'\r'],
         KeyCode::Backspace => vec![127],
+        // Shift+Tab is CBT (Cursor Backward Tabulation, `\x1b[Z`) regardless
+        // of whether it arrived as `BackTab` or as `Tab` with the SHIFT
+        // modifier set (the latter can happen when parsing a Kitty-encoded
+        // `\x1b[9;2u` from a host terminal; see kitty_codepoint_to_keycode).
+        KeyCode::Tab if key.modifiers.contains(KeyModifiers::SHIFT) => vec![27, 91, 90],
         KeyCode::Tab => vec![9],
         KeyCode::BackTab => vec![27, 91, 90],
         KeyCode::Esc => vec![27],
@@ -592,6 +624,24 @@ mod tests {
     fn legacy_shift_f5() {
         let key = KeyEvent::new(KeyCode::F(5), KeyModifiers::SHIFT);
         assert_eq!(encode_key(key, KeyboardProtocol::Legacy), b"\x1b[15;2~");
+    }
+
+    #[test]
+    fn legacy_shift_tab() {
+        // BackTab (the crossterm keycode Windows/xterm-style hosts send for
+        // Shift+Tab) always encodes as CBT.
+        let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(encode_key(backtab, KeyboardProtocol::Legacy), b"\x1b[Z");
+
+        // Tab with the SHIFT modifier set (e.g. after parsing a Kitty-encoded
+        // `\x1b[9;2u` from a host terminal) must also encode as CBT rather
+        // than a plain tab byte, or the SHIFT is silently dropped.
+        let shift_tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT);
+        assert_eq!(encode_key(shift_tab, KeyboardProtocol::Legacy), b"\x1b[Z");
+
+        // Plain Tab is unaffected.
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::empty());
+        assert_eq!(encode_key(tab, KeyboardProtocol::Legacy), vec![9]);
     }
 
     #[test]
@@ -838,11 +888,59 @@ mod tests {
     }
 
     #[test]
-    fn kitty_shift_tab() {
+    fn kitty_shift_tab_stays_legacy_without_report_all_keys() {
+        // Shift+Tab has a universally-understood legacy form (`\x1b[Z`, CBT).
+        // Some inner apps negotiate basic Kitty disambiguation (flag 1) but
+        // don't parse the CSI-u equivalent, so herdr keeps this on the
+        // legacy encoding until the app explicitly asks for full key
+        // reporting via REPORT_ALL_KEYS (flag 8).
         let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT);
         assert_eq!(
             encode_key(key, KeyboardProtocol::Kitty { flags: 1 }),
+            b"\x1b[Z"
+        );
+
+        let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(
+            encode_key(backtab, KeyboardProtocol::Kitty { flags: 1 }),
+            b"\x1b[Z"
+        );
+    }
+
+    #[test]
+    fn kitty_shift_tab_uses_csi_u_with_report_all_keys() {
+        let key = KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT);
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags: 9 }),
             b"\x1b[9;2u"
+        );
+
+        let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert_eq!(
+            encode_key(backtab, KeyboardProtocol::Kitty { flags: 9 }),
+            b"\x1b[9;2u"
+        );
+    }
+
+    #[test]
+    fn kitty_alt_char_stays_legacy_without_report_all_keys() {
+        // Alt+M (Claude Code's Windows mode-switch shortcut, among others)
+        // has a universally-understood legacy form (ESC followed by the
+        // character). Keep it on that encoding until the app explicitly
+        // asks for full key reporting via REPORT_ALL_KEYS (flag 8).
+        let key = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT);
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags: 1 }),
+            b"\x1bm"
+        );
+    }
+
+    #[test]
+    fn kitty_alt_char_uses_csi_u_with_report_all_keys() {
+        let key = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::ALT);
+        assert_eq!(
+            encode_key(key, KeyboardProtocol::Kitty { flags: 9 }),
+            b"\x1b[109;3u"
         );
     }
 

@@ -33,7 +33,21 @@ pub(super) fn ghostty_key_event_from_terminal_key(
 }
 
 pub(super) fn ghostty_prefers_herdr_text_encoding(key: crate::input::TerminalKey) -> bool {
-    matches!(key.code, crossterm::event::KeyCode::Char(_))
+    // Tab/BackTab are routed to herdr's own encoder rather than Ghostty's C
+    // encoder because Ghostty collapses both onto a single GHOSTTY_KEY_TAB
+    // keycode (see ghostty_key_from_crossterm_key_code below) and promotes
+    // Shift+Tab to a Kitty CSI-u sequence as soon as *any* Kitty keyboard
+    // flag is negotiated. Some inner apps (e.g. Claude Code on Windows) only
+    // request basic disambiguation and don't understand that CSI-u form,
+    // even though they handle the universally-supported legacy `\x1b[Z`
+    // (CBT) sequence fine. herdr's encoder keeps Tab/BackTab on the legacy
+    // encoding unless the app explicitly opts into REPORT_ALL_KEYS.
+    matches!(
+        key.code,
+        crossterm::event::KeyCode::Char(_)
+            | crossterm::event::KeyCode::Tab
+            | crossterm::event::KeyCode::BackTab
+    )
 }
 
 pub(super) fn ghostty_mods_from_key_modifiers(modifiers: crossterm::event::KeyModifiers) -> u16 {
