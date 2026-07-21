@@ -290,15 +290,17 @@ pub(crate) fn render_virtual_with_runtime_registry(
     resize_panes: bool,
     cell_size: crate::kitty_graphics::HostCellSize,
 ) -> (ratatui::buffer::Buffer, Option<CursorState>) {
+    let popup_visible = app_state.popup_pane.is_some();
     let pre_compute_suppresses_focused_terminal_cursor =
-        focused_terminal_suppresses_host_cursor(app_state, terminal_runtimes);
+        !popup_visible && focused_terminal_suppresses_host_cursor(app_state, terminal_runtimes);
     if resize_panes {
         crate::ui::compute_view_with_cell_size(app_state, terminal_runtimes, area, cell_size);
     } else {
         crate::ui::compute_view_without_resizing_panes(app_state, terminal_runtimes, area);
     }
     let suppress_focused_terminal_cursor = pre_compute_suppresses_focused_terminal_cursor
-        || focused_terminal_suppresses_host_cursor(app_state, terminal_runtimes);
+        || (!popup_visible
+            && focused_terminal_suppresses_host_cursor(app_state, terminal_runtimes));
 
     let backend = CursorTrackingBackend::new(area.width, area.height);
     let mut terminal = ratatui::Terminal::new(backend).expect("TestBackend::new should never fail");
@@ -310,7 +312,9 @@ pub(crate) fn render_virtual_with_runtime_registry(
         .expect("render to TestBackend should never fail");
 
     let buffer = terminal.backend().buffer().clone();
-    let cursor = if suppress_focused_terminal_cursor {
+    let cursor = if popup_visible {
+        popup_terminal_cursor(app_state, terminal_runtimes)
+    } else if suppress_focused_terminal_cursor {
         None
     } else {
         focused_terminal_cursor(app_state, terminal_runtimes).or_else(|| {
@@ -321,6 +325,25 @@ pub(crate) fn render_virtual_with_runtime_registry(
     };
 
     (buffer, cursor)
+}
+
+fn popup_terminal_cursor(
+    app_state: &AppState,
+    terminal_runtimes: &TerminalRuntimeRegistry,
+) -> Option<CursorState> {
+    let popup = app_state.popup_pane.as_ref()?;
+    let runtime = terminal_runtimes.get(&popup.terminal_id)?;
+    if runtime.synchronized_output_active() {
+        return None;
+    }
+    let (_, inner) = crate::ui::popup_pane_rects(app_state, app_state.view.terminal_area)?;
+    let cursor = runtime.cursor_state(inner, true)?;
+    Some(CursorState {
+        x: cursor.x,
+        y: cursor.y,
+        visible: cursor.visible && !crate::ui::pane_is_scrolled_back(runtime),
+        shape: cursor.shape,
+    })
 }
 
 /// Renders one server-owned terminal directly for `terminal attach` clients.
@@ -361,94 +384,14 @@ pub(crate) fn visible_hyperlinks(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> Vec<((u16, u16), String, String)> {
-    let Some(ws_idx) = app_state.active else {
-        return Vec::new();
-    };
-    if app_state.workspaces.get(ws_idx).is_none() {
-        return Vec::new();
-    }
-
-    let mut links = Vec::new();
-    for info in &app_state.view.pane_infos {
-        if let Some(runtime) =
-            app_state.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)
-        {
-            links.extend(runtime.visible_hyperlinks(info.inner_rect));
-        }
-    }
-    links
+    crate::ui::tab_surface_hyperlinks(app_state, terminal_runtimes, app_state.view.tab_surface())
 }
 
 pub(crate) fn focused_terminal_cursor(
     app_state: &AppState,
     terminal_runtimes: &TerminalRuntimeRegistry,
 ) -> Option<CursorState> {
-    if app_state.mode != Mode::Terminal {
-        return None;
-    }
-
-    let ws_idx = app_state.active?;
-    let info = app_state
-        .view
-        .pane_infos
-        .iter()
-        .find(|info| info.is_focused)?;
-    if !app_state.pane_exposes_host_cursor(ws_idx, info.id) {
-        return None;
-    }
-    let rt = app_state.runtime_for_pane_in_workspace(terminal_runtimes, ws_idx, info.id)?;
-    if rt.synchronized_output_active() {
-        return None;
-    }
-    let scrolled_back = crate::ui::pane_is_scrolled_back(rt);
-    // Determine whether the IME-anchor reveal applies to this focused pane.
-    // The master switch must be on, and either no agent filter is configured
-    // (apply to any pane) or the focused pane's detected agent matches the
-    // allow-list. A configured list with no valid entries reveals nothing.
-    let reveal = app_state.reveal_hidden_cursor_for_cjk_ime
-        && (!app_state.cjk_ime_agent_filter_configured || {
-            let detected = app_state
-                .workspaces
-                .get(ws_idx)
-                .and_then(|ws| ws.terminal_id(info.id))
-                .and_then(|tid| app_state.terminals.get(tid))
-                .and_then(|t| t.detected_agent);
-            detected.is_some_and(|agent| app_state.cjk_ime_agents.contains(&agent))
-        });
-
-    if let Some(cursor) = rt.cursor_state(info.inner_rect, true) {
-        // When the reveal applies, expose the cursor anchor regardless of the
-        // pane's `?25l` request so macOS IMEs keep tracking the candidate
-        // window when TUIs paint their own cursor. Scrollback suppression
-        // still applies.
-        let visible = if reveal {
-            !scrolled_back
-        } else {
-            cursor.visible && !scrolled_back
-        };
-        Some(CursorState {
-            x: cursor.x,
-            y: cursor.y,
-            visible,
-            shape: if reveal && visible {
-                app_state.cjk_ime_cursor_shape
-            } else {
-                cursor.shape
-            },
-        })
-    } else if reveal && !scrolled_back {
-        // cursor_state() returned None — the viewport has no cursor position
-        // (can happen with complex TUIs). Fall back to the pane's top-left so
-        // the outer terminal still exposes a cursor anchor for IME tracking.
-        Some(CursorState {
-            x: info.inner_rect.x,
-            y: info.inner_rect.y,
-            visible: true,
-            shape: app_state.cjk_ime_cursor_shape,
-        })
-    } else {
-        None
-    }
+    crate::ui::tab_surface_cursor(app_state, terminal_runtimes, app_state.view.tab_surface())
 }
 
 fn focused_terminal_owns_host_cursor(

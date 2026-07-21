@@ -7,6 +7,7 @@ mod subscriptions;
 mod wait;
 
 pub use event_hub::EventHub;
+pub(crate) use server::cancel_inactive_pane_graphics_streams;
 pub use server::{start_server, start_server_with_capabilities, ServerHandle};
 pub use status::{read_runtime_status_at, RuntimeStatus};
 
@@ -41,8 +42,12 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::LayoutApply(_)
             | Method::LayoutSetSplitRatio(_)
             | Method::AgentRename(_)
+            | Method::AgentViewSet(_)
+            | Method::AgentViewClear(_)
             | Method::AgentFocus(_)
             | Method::AgentStart(_)
+            | Method::AgentPrompt(_)
+            | Method::AgentSendKeys(_)
             | Method::PaneSplit(_)
             | Method::PaneSwap(_)
             | Method::PaneMove(_)
@@ -51,12 +56,21 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
             | Method::PaneResize(_)
             | Method::PaneFocus(_)
             | Method::PaneRename(_)
+            | Method::PaneGraphicsSet(_)
+            | Method::PaneGraphicsClear(_)
+            | Method::PaneGraphicsStream(_)
+            | Method::PaneGraphicsStreamSet(_)
+            | Method::PaneGraphicsStreamOpen(_)
+            | Method::PaneGraphicsStreamClose(_)
             | Method::PaneReportAgent(_)
             | Method::PaneReportAgentSession(_)
             | Method::PaneReportMetadata(_)
             | Method::PaneClearAgentAuthority(_)
             | Method::PaneReleaseAgent(_)
             | Method::PaneClose(_)
+            | Method::PopupClose(_)
+            | Method::PluginUnlink(_)
+            | Method::PluginDisable(_)
             | Method::PluginActionInvoke(_)
             | Method::PluginPaneOpen(_)
             | Method::PluginPaneFocus(_)
@@ -67,6 +81,7 @@ pub(crate) fn request_changes_ui(request: &Request) -> bool {
 pub struct ApiRequestMessage {
     pub request: Request,
     pub respond_to: std::sync::mpsc::Sender<String>,
+    pub response_write_complete: Option<std::sync::mpsc::Receiver<()>>,
 }
 
 pub type ApiRequestSender = mpsc::UnboundedSender<ApiRequestMessage>;

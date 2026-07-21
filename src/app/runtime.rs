@@ -142,7 +142,7 @@ impl App {
                 let key_id = repeat_key_identity(&key);
                 match key.kind {
                     crossterm::event::KeyEventKind::Press => {
-                        if self.state.mode == Mode::Terminal {
+                        if self.state.popup_pane.is_some() || self.state.mode == Mode::Terminal {
                             self.suppressed_repeat_keys.remove(&key_id);
                         } else {
                             self.suppressed_repeat_keys.insert(key_id);
@@ -151,7 +151,7 @@ impl App {
                         true
                     }
                     crossterm::event::KeyEventKind::Repeat => {
-                        if self.state.mode == Mode::Terminal
+                        if (self.state.popup_pane.is_some() || self.state.mode == Mode::Terminal)
                             && !self.suppressed_repeat_keys.contains(&key_id)
                         {
                             self.handle_key(key).await;
@@ -171,7 +171,7 @@ impl App {
                 true
             }
             crate::raw_input::RawInputEvent::Mouse(mouse) => {
-                if self.state.mouse_capture {
+                if self.state.popup_pane.is_some() || self.state.mouse_capture {
                     self.handle_mouse(mouse);
                 } else {
                     self.state
@@ -256,6 +256,21 @@ impl App {
                 self.refresh_agent_notification_delivery_contexts(&mut deliveries);
                 self.emit_delayed_client_local_agent_notifications(&deliveries);
                 self.sync_toast_deadline(previous_toast);
+                changed = true;
+            }
+        }
+
+        if self
+            .state
+            .next_managed_agent_deadline()
+            .is_some_and(|deadline| now >= deadline)
+        {
+            let panes = self.state.reconcile_managed_agents_at(now);
+            if !panes.is_empty() {
+                for (ws_idx, pane_id) in panes {
+                    self.emit_pane_updated(ws_idx, pane_id);
+                }
+                self.schedule_session_save();
                 changed = true;
             }
         }
@@ -593,6 +608,7 @@ impl App {
             self.config_diagnostic_deadline,
             self.toast_deadline,
             self.state.next_pending_agent_notification_deadline(),
+            self.state.next_managed_agent_deadline(),
             self.copy_feedback_deadline,
             self.next_animation_tick,
             include_git_refresh

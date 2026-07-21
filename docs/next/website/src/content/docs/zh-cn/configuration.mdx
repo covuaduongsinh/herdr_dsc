@@ -163,10 +163,33 @@ focus_agent = "prefix+alt+1..9"
 ```toml
 [[keys.command]]
 key = "prefix+alt+g"
-type = "pane"
+type = "popup"
 command = "lazygit"
 description = "run lazygit"
+width = "80%"
+height = "80%"
 ```
+
+`type = "popup"` 会打开一个会话级模态弹窗,而不改变标签页布局。
+弹窗会接收包括 Escape 在内的所有终端输入,直到命令退出。
+`width` 和 `height` 是可选的;省略时默认为终端大小的一半,数字表示终端单元格数,`"80%"` 这样的字符串表示终端区域的百分比。
+尺寸包含弹窗边框,过小的值会限制为弹窗最小尺寸。
+弹窗命令不会收到 `HERDR_PANE_ID`;可使用 `HERDR_ACTIVE_PANE_ID` 引用底层平铺窗格。
+
+在 Unix 和 macOS 上,还可以打开一个临时终端,而无需添加分割或标签页:
+
+```toml
+[[keys.command]]
+key = "prefix+t"
+type = "popup"
+command = "exec \"${SHELL:-sh}\""
+description = "open scratch terminal"
+width = "80%"
+height = "80%"
+```
+
+在 Windows 上,请改用 `command = "powershell.exe -NoLogo"` 之类的 shell 命令。
+退出 shell 即可关闭弹窗并恢复平铺终端视图。
 
 `type = "pane"` 会打开一个临时窗格，并在命令退出时关闭它。
 
@@ -235,12 +258,14 @@ yellow = "#f9e2af"
 
 ```toml
 [ui.sidebar.agents]
+row_gap = 0
 rows = [
   ["state_icon", "workspace", "tab"],
   ["agent"],
 ]
 
 [ui.sidebar.spaces]
+row_gap = 0
 rows = [
   ["state_icon", "workspace"],
   ["branch", "git_status"],
@@ -269,6 +294,20 @@ Space 行支持以下内置 token：
 - `$name` — 名为 `name` 的自定义工作区元数据。
 
 token 会按配置顺序渲染。Herdr 通常使用 ` · ` 分隔相邻值，并在 `state_icon` 后使用一个空格。缺失值及其分隔符会消失；当一行中的所有 token 都没有值时，该行会消失。每个布局最多可包含 16 行，每行最多可包含 16 个 token。
+
+也可以用内联样式表定义 token：
+
+```toml
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", { token = "workspace", bold = false }, "tab"],
+  [{ token = "$summary", fg = "#89b4fa", bold = true, dim = false }],
+]
+```
+
+`fg` 只接受严格的 `#RGB` 或 `#RRGGBB`，`bold` 和 `dim` 接受布尔值。省略字段会保留上下文样式；显式 `false` 会移除对应修饰。样式只作用于当前出现位置。为 `git_status` 设置 `fg` 后，ahead 和 behind 会使用同一种颜色，而不是默认的绿色和红色。token 样式不会改变分隔符或行背景。
+
+`row_gap` 分别控制 Agent 和 Space 面板中条目之间的空白终端行数。默认值为 `0`，会紧密排列条目；设为 `1` 可恢复之前的间距。它不会在 `rows` 声明的内容行之间添加间距。连续缩进的 worktree 子项仍会作为一个 Space 组紧密排列。
 
 在 `rows_by_agent` 下为已知智能体覆盖完整的 Agent 布局：
 
@@ -307,7 +346,9 @@ herdr pane report-metadata <pane_id> \
   --token summary="reviewing authentication"
 ```
 
-自定义 Space token 可用同样的方式通过 `herdr workspace report-metadata` 报告。未报告的自定义 token 会直接消失。元数据报告方只提供值，不能选择行或样式。有关清除、顺序和过期值的信息，请参阅 [CLI 参考：报告元数据](/docs/cli-reference/#panes)。
+自定义 Space token 可用同样的方式通过 `herdr workspace report-metadata` 报告。未报告的自定义 token 会直接消失。
+
+元数据上报方只提供值；样式由本地侧边栏配置控制。有关限制、清除、顺序和过期值的信息，请参阅 [CLI 参考：报告元数据](/docs/cli-reference/#panes)。
 
 侧边栏行设置仅影响展开的桌面侧边栏。折叠视图和移动视图仍使用紧凑布局。
 

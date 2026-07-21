@@ -73,6 +73,9 @@ command = ["npm", "ci"]
 command = ["npm", "run", "build"]
 platforms = ["linux", "macos"]
 
+[[startup]]
+command = ["node", "dist/restore.js"]
+
 [[actions]]
 id = "apply"
 title = "Apply layout"
@@ -109,9 +112,10 @@ dots. Each id type must be unique inside a plugin. Herdr qualifies action ids
 as `plugin.id.action` when it needs a globally unique name.
 
 Use `platforms = ["linux", "macos", "windows"]` to declare where the plugin
-can run. Build commands, actions, event hooks, panes, and link handlers can
-also declare their own `platforms`; item-level platforms override the top-level
-list. Local plugins without top-level `platforms` link with a warning.
+can run. Build commands, startup hooks, actions, event hooks, panes, and link
+handlers can also declare their own `platforms`; item-level platforms override
+the top-level list. Local plugins without top-level `platforms` link with a
+warning.
 
 `command` values are argv arrays. Herdr does not run them through a shell, so
 there is no shell expansion unless your command starts a shell itself. Put
@@ -190,6 +194,11 @@ herdr plugin log list --plugin example.layout
 terminals, runs supported build commands, then stores the checkout under
 Herdr-managed plugin data and registers it. Use `--yes` for noninteractive
 installs. Reinstalling a GitHub-managed plugin replaces that managed checkout.
+Installed and linked plugins, including their enabled state, are global to the
+current user and available in every Herdr session. Both `plugin install` and
+`plugin link` can register plugins while no Herdr server is running. Plugins
+installed only in a named session on Herdr 0.7.3 must be installed or linked
+again. Existing plugin config and state remain in place.
 Installing over a locally linked plugin is refused; unlink or uninstall the
 local plugin first. `plugin install` and `plugin link` create the plugin's
 config and state directories, and `plugin config-dir <id>` prints the config
@@ -222,6 +231,24 @@ plugin context or Herdr socket env. Plugin authors should document required
 system tools such as `cargo`, `npm`, `bun`, or `lua`; Herdr reports build
 failures but does not install missing toolchains.
 
+## Startup hooks
+
+`[[startup]]` commands run once for each enabled plugin after Herdr restores the
+session and its API socket is ready. They run again when a new server takes over
+during live handoff, but not when a client attaches, config reloads, or a plugin
+is linked or enabled. Herdr starts them asynchronously and records their
+completion in the normal plugin command log. A startup failure does not stop the
+server.
+
+Startup hooks are one-shot initialization commands, not supervised daemons. A
+hook should restore plugin-owned state, call any required Herdr APIs, and exit.
+For example, a plugin can save a declarative Agent view under
+`HERDR_PLUGIN_STATE_DIR`, then read and reapply that view from its startup hook.
+
+Startup hooks receive the normal runtime plugin environment and
+`HERDR_PLUGIN_EVENT=startup`. The install preview lists every startup command so
+users can review code that will run automatically.
+
 ## Commands and environment
 
 Runtime commands run with the plugin directory as their working directory. Herdr
@@ -229,8 +256,10 @@ injects `HERDR_SOCKET_PATH`, `HERDR_BIN_PATH`, `HERDR_ENV=1`,
 `HERDR_PLUGIN_ID`, `HERDR_PLUGIN_ROOT`, `HERDR_PLUGIN_CONFIG_DIR`,
 `HERDR_PLUGIN_STATE_DIR`, `HERDR_PLUGIN_CONTEXT_JSON`, and any available
 `HERDR_WORKSPACE_ID`, `HERDR_TAB_ID`, and `HERDR_PANE_ID`. Action commands also
-receive `HERDR_PLUGIN_ACTION_ID`; event hooks receive `HERDR_PLUGIN_EVENT` and
-`HERDR_PLUGIN_EVENT_JSON`; pane commands receive `HERDR_PLUGIN_ENTRYPOINT_ID`.
+receive `HERDR_PLUGIN_ACTION_ID`; startup and event hooks receive
+`HERDR_PLUGIN_EVENT` (`startup` for startup hooks), event hooks additionally
+receive `HERDR_PLUGIN_EVENT_JSON`, and pane commands receive
+`HERDR_PLUGIN_ENTRYPOINT_ID`.
 
 `HERDR_PLUGIN_ROOT` is the installed or linked plugin directory. Do not store
 user credentials or durable state there, because GitHub-installed plugin roots
@@ -259,12 +288,41 @@ while Windows clients connect to a named pipe. CLI calls through
 Manifest pane `placement` defaults to `overlay`, which opens a temporary zoomed
 overlay over the active pane and restores the previous focus and zoom when it
 closes. A `plugin.pane.open` request can override the manifest placement with
-`overlay`, `split`, `tab`, or `zoomed`.
+`overlay`, `popup`, `split`, `tab`, or `zoomed`.
 
-Plugin panes are normal Herdr panes after they open. Plugins can call standard
-pane APIs such as `pane.move`, `pane.swap`, `pane.resize`, and `pane.zoom`
-through the socket or CLI; Herdr keeps plugin pane ownership attached to the
-underlying pane when it moves across tabs or workspaces.
+`placement = "popup"` opens a session-modal terminal popup without changing the
+tiled layout. It accepts optional `width` and `height` fields in the manifest or
+open request; omit them for the default half-size popup, use numbers for outer
+terminal-cell dimensions, or use strings like `"80%"` for a percentage of the
+terminal area. It receives all terminal input, including Escape, and closes
+when the command exits or a `popup.close` request is sent. Dimensions smaller
+than the popup minimum are clamped.
+
+Declare the placement directly on a plugin pane entrypoint when the pane should
+always be transient:
+
+```toml
+[[panes]]
+id = "picker"
+title = "Picker"
+platforms = ["linux", "macos"]
+placement = "popup"
+width = "80%"
+height = 20
+command = ["sh", "picker.sh"]
+```
+
+Split, tab, zoomed, and overlay plugin panes are normal Herdr panes after they
+open. Plugins can call standard pane APIs such as `pane.move`, `pane.swap`,
+`pane.resize`, and `pane.zoom` through the socket or CLI; Herdr keeps plugin
+pane ownership attached to the underlying pane when it moves across tabs or
+workspaces. A popup is a singleton session resource rather than a Herdr pane:
+it has no pane ID, does not change plugin focus context, emits no pane lifecycle
+events, and does not participate in pane, layout, persistence, or agent APIs.
+Its process does not receive `HERDR_PANE_ID`; the underlying tiled pane remains
+available through `HERDR_PLUGIN_CONTEXT_JSON`.
+Opening a popup returns `ui_busy` while Settings, Copy mode, or another Herdr
+modal is active, and `plugin.pane.open` returns an `ok` result after launch.
 
 On Windows, build commands, action commands, and event commands resolve common
 `PATHEXT` shims such as `npm.cmd`, `bun.cmd`, and `pnpm.cmd` when the bare

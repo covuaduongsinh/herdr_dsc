@@ -588,6 +588,12 @@
           "description": "Capture mouse input for Herdr's mouse UI."
         },
         {
+          "key": "ui.copy_on_select",
+          "type": "boolean",
+          "default": "true",
+          "description": "Copy text selected with the mouse."
+        },
+        {
           "key": "ui.host_cursor",
           "type": "enum",
           "default": "auto",
@@ -661,6 +667,36 @@
             "spaces",
             "priority"
           ]
+        },
+        {
+          "key": "ui.sidebar.agents.row_gap",
+          "type": "integer",
+          "default": "0",
+          "description": "Blank terminal rows between expanded Agent sidebar entries. Set to 1 to restore the previous spacing."
+        },
+        {
+          "key": "ui.sidebar.agents.rows",
+          "type": "list of token rows",
+          "default": "[[\"state_icon\", \"workspace\", \"tab\"], [\"agent\"]]",
+          "description": "Default expanded Agent sidebar layout. Supports built-in tokens and $name metadata tokens; at most 16 rows and 16 tokens per row."
+        },
+        {
+          "key": "ui.sidebar.agents.rows_by_agent",
+          "type": "table of token rows",
+          "default": "{}",
+          "description": "Complete Agent-row overrides keyed by strict canonical agent id. Agents without an override use ui.sidebar.agents.rows."
+        },
+        {
+          "key": "ui.sidebar.spaces.row_gap",
+          "type": "integer",
+          "default": "0",
+          "description": "Blank terminal rows between expanded Space sidebar entries. Set to 1 to restore the previous spacing. Consecutive indented worktree children remain packed as one group."
+        },
+        {
+          "key": "ui.sidebar.spaces.rows",
+          "type": "list of token rows",
+          "default": "[[\"state_icon\", \"workspace\"], [\"branch\", \"git_status\"]]",
+          "description": "Expanded Space sidebar layout. Supports built-in tokens and $name metadata tokens; at most 16 rows and 16 tokens per row."
         },
         {
           "key": "ui.accent",
@@ -951,6 +987,17 @@
             "on",
             "off"
           ]
+        },
+        {
+          "key": "ui.sound.agents.maki",
+          "type": "enum",
+          "default": "\"default\"",
+          "description": "Sound override for detected Maki agents.",
+          "values": [
+            "default",
+            "on",
+            "off"
+          ]
         }
       ]
     },
@@ -1034,7 +1081,7 @@
           "key": "experimental.cjk_ime_agents",
           "type": "list of strings",
           "default": "[]",
-          "description": "Restrict `reveal_hidden_cursor_for_cjk_ime` to focused panes whose detected agent matches one of these names (case-insensitive). Empty list means apply to any focused pane. Unknown agent names are ignored; if the list contains no valid names, the reveal does not apply. Accepted names: pi, claude, codex, gemini, cursor, devin, cline, opencode, copilot, kimi, kiro, droid, amp, grok, hermes, kilo, qodercli, qoder."
+          "description": "Restrict `reveal_hidden_cursor_for_cjk_ime` to focused panes whose detected agent matches one of these names (case-insensitive). Empty list means apply to any focused pane. Unknown agent names are ignored; if the list contains no valid names, the reveal does not apply. Accepted names: pi, claude, codex, gemini, cursor, devin, cline, opencode, copilot, kimi, kiro, droid, amp, grok, hermes, kilo, qodercli, qoder, maki."
         },
         {
           "key": "experimental.cjk_ime_cursor_shape",

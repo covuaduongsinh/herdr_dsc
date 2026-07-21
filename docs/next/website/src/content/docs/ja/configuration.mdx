@@ -163,10 +163,33 @@ focus_agent = "prefix+alt+1..9"
 ```toml
 [[keys.command]]
 key = "prefix+alt+g"
-type = "pane"
+type = "popup"
 command = "lazygit"
 description = "run lazygit"
+width = "80%"
+height = "80%"
 ```
+
+`type = "popup"` は、タブレイアウトを変更せずにセッションモーダルなポップアップを開きます。
+ポップアップは、コマンドが終了するまで Escape を含むすべてのターミナル入力を受け取ります。
+`width` と `height` は任意です。省略するとデフォルトの半分のサイズになり、数値ならターミナルセル数、`"80%"` のような文字列ならターミナル領域に対する割合を指定できます。
+寸法にはポップアップの枠が含まれ、小さすぎる値は最小サイズに制限されます。
+ポップアップコマンドは `HERDR_PANE_ID` を受け取りません。背後のタイルペインには `HERDR_ACTIVE_PANE_ID` を使ってください。
+
+Unix と macOS では、分割やタブを追加せずに一時的なターミナルを開くこともできます:
+
+```toml
+[[keys.command]]
+key = "prefix+t"
+type = "popup"
+command = "exec \"${SHELL:-sh}\""
+description = "open scratch terminal"
+width = "80%"
+height = "80%"
+```
+
+Windows では、代わりに `command = "powershell.exe -NoLogo"` のようなシェルコマンドを使ってください。
+シェルを終了するとポップアップが閉じ、タイル表示に戻ります。
 
 `type = "pane"` は一時的なペインを開き、コマンドの終了時に閉じます。
 
@@ -235,12 +258,14 @@ yellow = "#f9e2af"
 
 ```toml
 [ui.sidebar.agents]
+row_gap = 0
 rows = [
   ["state_icon", "workspace", "tab"],
   ["agent"],
 ]
 
 [ui.sidebar.spaces]
+row_gap = 0
 rows = [
   ["state_icon", "workspace"],
   ["branch", "git_status"],
@@ -269,6 +294,20 @@ Space の行では、次の組み込みトークンを使えます:
 - `$name` — `name` という名前のカスタムワークスペースメタデータ。
 
 トークンは設定された順序で描画されます。Herdr は通常、隣接する値を ` · ` で区切り、`state_icon` の後には空白を 1 つ入れます。値がない場合、その値と区切りは表示されません。すべてのトークンに値がない行は表示されません。各レイアウトは最大 16 行、各行は最大 16 トークンです。
+
+トークンエントリにはインラインのスタイルテーブルも使えます:
+
+```toml
+[ui.sidebar.agents]
+rows = [
+  ["state_icon", { token = "workspace", bold = false }, "tab"],
+  [{ token = "$summary", fg = "#89b4fa", bold = true, dim = false }],
+]
+```
+
+`fg` は厳密な `#RGB` または `#RRGGBB`、`bold` と `dim` は真偽値です。省略したフィールドはコンテキストのスタイルを保持し、明示的な `false` はその修飾を解除します。スタイルは 1 つの出現箇所だけに適用されます。`fg` を指定した `git_status` では、既定の緑/赤ではなく ahead と behind の両方が同じ色になります。区切りと行の背景は変更されません。
+
+`row_gap` は、Agent パネルと Space パネルごとに、エントリ間の空白行数を指定します。デフォルトは `0` で、エントリを詰めて表示します。以前の間隔に戻すには `1` に設定します。`rows` で定義したコンテンツ行の間隔には影響しません。連続するインデントされた worktree の子は、1 つの Space グループとして詰めて表示されます。
 
 既知のエージェントについて Agent の完全なレイアウトを上書きするには、`rows_by_agent` を使います:
 
@@ -307,7 +346,9 @@ herdr pane report-metadata <pane_id> \
   --token summary="reviewing authentication"
 ```
 
-カスタム Space トークンには、同じ方法で `herdr workspace report-metadata` を使います。報告されていないカスタムトークンは表示されません。メタデータの報告元が提供できるのは値だけで、行やスタイルは選べません。値のクリア、シーケンス、有効期限については、[CLI リファレンス: report metadata](/docs/cli-reference/#panes)を参照してください。
+カスタム Space トークンには、同じ方法で `herdr workspace report-metadata` を使います。報告されていないカスタムトークンは表示されません。
+
+メタデータの報告元が提供できるのは値だけで、スタイルはローカルのサイドバー設定で管理します。上限、クリア、シーケンス、有効期限については、[CLI リファレンス: report metadata](/docs/cli-reference/#panes)を参照してください。
 
 サイドバーの行設定は、展開されたデスクトップサイドバーにだけ適用されます。折りたたみ表示とモバイル表示はコンパクトなレイアウトを保ちます。
 

@@ -148,6 +148,7 @@ impl TerminalRuntime {
         cwd: std::path::PathBuf,
         command: &str,
         launch_env: &crate::pane::PaneLaunchEnv,
+        agent_detection: crate::pane::AgentDetection,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         events: mpsc::Sender<AppEvent>,
@@ -161,6 +162,7 @@ impl TerminalRuntime {
             cwd,
             command,
             launch_env,
+            agent_detection,
             scrollback_limit_bytes,
             host_terminal_theme,
             events,
@@ -170,6 +172,8 @@ impl TerminalRuntime {
         .map(Self)
     }
 
+    // Wrapper mirrors pane runtime construction arguments, including detection policy.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_argv_command(
         pane_id: PaneId,
         rows: u16,
@@ -177,6 +181,7 @@ impl TerminalRuntime {
         cwd: std::path::PathBuf,
         argv: &[String],
         launch_env: &crate::pane::PaneLaunchEnv,
+        agent_detection: crate::pane::AgentDetection,
         scrollback_limit_bytes: usize,
         host_terminal_theme: crate::terminal_theme::TerminalTheme,
         events: mpsc::Sender<AppEvent>,
@@ -190,6 +195,7 @@ impl TerminalRuntime {
             cwd,
             argv,
             launch_env,
+            agent_detection,
             scrollback_limit_bytes,
             host_terminal_theme,
             events,
@@ -216,6 +222,11 @@ impl TerminalRuntime {
         &self,
     ) -> std::sync::Arc<tokio::sync::Notify> {
         self.0.agent_detection_reset_notify_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn agent_detection_enabled_for_test(&self) -> bool {
+        self.0.agent_detection_enabled_for_test()
     }
 
     pub fn set_full_lifecycle_authority_active(&self, active: bool) {
@@ -389,6 +400,10 @@ impl TerminalRuntime {
         self.0.send_paste(text).await
     }
 
+    pub fn try_send_paste(&self, text: String) -> Result<(), mpsc::error::TrySendError<Bytes>> {
+        self.0.try_send_paste(text)
+    }
+
     pub fn try_send_focus_event(&self, event: crate::ghostty::FocusEvent) -> bool {
         self.0.try_send_focus_event(event)
     }
@@ -436,6 +451,10 @@ impl TerminalRuntime {
 
     pub fn cwd(&self) -> Option<std::path::PathBuf> {
         self.0.cwd()
+    }
+
+    pub fn follow_cwd(&self) -> Option<std::path::PathBuf> {
+        self.0.follow_cwd()
     }
 
     pub fn foreground_cwd(&self) -> Option<std::path::PathBuf> {
