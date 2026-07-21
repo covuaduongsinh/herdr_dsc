@@ -36,7 +36,6 @@ use tracing::{debug, info, warn};
 
 use crate::ipc::LocalStream;
 use crate::protocol::render_ansi;
-#[cfg(unix)]
 use crate::protocol::MAX_CLIPBOARD_IMAGE_PAYLOAD;
 use crate::protocol::{
     self, AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientLaunchMode,
@@ -58,7 +57,6 @@ struct ClientLoopConfig {
     host_cursor: crate::config::HostCursorModeConfig,
     kitty_graphics_enabled: bool,
     mouse_capture_active: bool,
-    #[cfg(unix)]
     remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
 }
 
@@ -79,8 +77,9 @@ struct ClientState {
     /// Rows scrolled for one direct-attach wheel notch.
     #[cfg(unix)]
     mouse_scroll_lines: usize,
-    /// Local-client shortcut that sends a clipboard image to a remote Herdr session.
-    #[cfg(unix)]
+    /// Hotkey that bridges the local clipboard image to the Herdr agent (remote
+    /// sessions on any OS, or a local Windows session). See
+    /// `client_remote_image_paste_key`.
     remote_image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
     /// Whether outer focus gain should force a full host-terminal redraw.
     redraw_on_focus_gained: bool,
@@ -659,7 +658,6 @@ fn requested_render_encoding() -> RenderEncoding {
     }
 }
 
-#[cfg(unix)]
 fn is_remote_client_process() -> bool {
     std::env::var(crate::remote::REMOTE_KEYBINDINGS_ENV_VAR).is_ok()
 }
@@ -672,11 +670,9 @@ fn is_remote_client_process() -> bool {
 /// window; on a high-latency link that easily exceeds 5s, so it gets a far
 /// larger budget. See issue #753.
 const LOCAL_HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(5);
-#[cfg(unix)]
 const REMOTE_HANDSHAKE_READ_TIMEOUT: Duration = Duration::from_secs(60);
 
 fn handshake_read_timeout() -> Duration {
-    #[cfg(unix)]
     if is_remote_client_process() {
         return REMOTE_HANDSHAKE_READ_TIMEOUT;
     }
@@ -1118,7 +1114,6 @@ fn run_client_with_mode(
     let redraw_on_focus_gained = loaded_config.config.ui.redraw_on_focus_gained;
     let host_cursor = loaded_config.config.ui.host_cursor;
     let direct_attach_requested = attach_request.is_some();
-    #[cfg(unix)]
     let remote_image_paste_key = client_remote_image_paste_key(&loaded_config.config);
     let kitty_graphics_enabled =
         loaded_config.config.experimental.kitty_graphics && !direct_attach_requested;
@@ -1129,7 +1124,6 @@ fn run_client_with_mode(
         host_cursor,
         kitty_graphics_enabled,
         mouse_capture_active: mouse_capture,
-        #[cfg(unix)]
         remote_image_paste_key,
     };
 
@@ -1280,6 +1274,8 @@ async fn run_client_loop(
     #[cfg(windows)]
     let _ = config.mouse_scroll_lines;
     let draw_host_cursor = attach_escape.is_none() && should_draw_host_cursor(config.host_cursor);
+    // Only the Unix stdin path consults this directly; the Windows path gates
+    // clipboard-image bridging on `remote_image_paste_key` presence instead.
     #[cfg(unix)]
     let is_remote_client = is_remote_client_process();
 
@@ -1292,7 +1288,6 @@ async fn run_client_loop(
         attach_escape,
         #[cfg(unix)]
         mouse_scroll_lines: config.mouse_scroll_lines,
-        #[cfg(unix)]
         remote_image_paste_key: config.remote_image_paste_key,
         redraw_on_focus_gained: config.redraw_on_focus_gained,
         draw_host_cursor,
@@ -1484,6 +1479,37 @@ async fn run_client_loop(
                 ) {
                     state.request_full_redraw();
                 }
+                if should_bridge_clipboard_image_paste_events(
+                    &raw_events,
+                    state.remote_image_paste_key,
+                ) {
+                    if let Some(image) = crate::platform::read_clipboard_image() {
+                        if image.bytes.len() > MAX_CLIPBOARD_IMAGE_PAYLOAD {
+                            warn!(
+                                bytes = image.bytes.len(),
+                                max = MAX_CLIPBOARD_IMAGE_PAYLOAD,
+                                "local clipboard image is too large to bridge"
+                            );
+                            continue;
+                        }
+                        info!(
+                            bytes = image.bytes.len(),
+                            extension = image.extension,
+                            "bridging local clipboard image paste to herdr server"
+                        );
+                        let msg = ClientMessage::ClipboardImage {
+                            extension: image.extension.to_owned(),
+                            data: image.bytes,
+                        };
+                        if let Err(e) = write_to_server(&mut write_stream, &msg) {
+                            return Err(ClientError::ConnectionLost(e));
+                        }
+                        continue;
+                    }
+                    info!(
+                        "clipboard image paste trigger received, but local clipboard has no image"
+                    );
+                }
                 let msg = ClientMessage::InputEvents { events };
                 if let Err(e) = write_to_server(&mut write_stream, &msg) {
                     return Err(ClientError::ConnectionLost(e));
@@ -1565,7 +1591,6 @@ async fn run_client_loop(
                         &mut state.sound_config,
                         &mut state.redraw_on_focus_gained,
                         &mut state.draw_host_cursor,
-                        #[cfg(unix)]
                         &mut state.remote_image_paste_key,
                     );
                 }
@@ -1678,18 +1703,31 @@ fn write_to_server(stream: &mut LocalStream, msg: &ClientMessage) -> io::Result<
 // Notifications
 // ---------------------------------------------------------------------------
 
-#[cfg(unix)]
+/// The clipboard-image paste hotkey (from `keys.remote_image_paste`) for this
+/// client, or `None` when clipboard-image bridging does not apply.
+///
+/// Herdr bridges clipboard images by having the client read the local
+/// clipboard, send the bytes to the server, and let the server stage them to a
+/// file and paste its path to the agent. That indirection is only needed when
+/// the agent cannot read the local clipboard image itself:
+///
+/// - Remote clients (any OS): the agent runs on the remote host.
+/// - Local clients on Windows: a Windows agent running under a local Herdr
+///   server has no direct access to the Windows clipboard image.
+///
+/// Local macOS/Linux agents read the system clipboard directly, so no bridging
+/// is needed there and this returns `None`.
 fn client_remote_image_paste_key(
     config: &crate::config::Config,
 ) -> Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)> {
-    if !is_remote_client_process() {
+    if !is_remote_client_process() && !cfg!(target_os = "windows") {
         return None;
     }
 
     match config.remote_image_paste_key() {
         Ok(key) => key,
         Err(diagnostic) => {
-            warn!(diagnostic = %diagnostic, "local remote image paste key config diagnostic");
+            warn!(diagnostic = %diagnostic, "image paste key config diagnostic");
             None
         }
     }
@@ -1699,7 +1737,7 @@ fn reload_local_client_config(
     sound_config: &mut crate::config::SoundConfig,
     redraw_on_focus_gained: &mut bool,
     draw_host_cursor: &mut bool,
-    #[cfg(unix)] remote_image_paste_key: &mut Option<(
+    remote_image_paste_key: &mut Option<(
         crossterm::event::KeyCode,
         crossterm::event::KeyModifiers,
     )>,
@@ -1709,15 +1747,11 @@ fn reload_local_client_config(
             for diagnostic in loaded.config.ui.sound.diagnostics() {
                 warn!(diagnostic = %diagnostic, "local sound config diagnostic");
             }
-            #[cfg(unix)]
             let loaded_remote_image_paste_key = client_remote_image_paste_key(&loaded.config);
             *sound_config = loaded.config.ui.sound;
             *redraw_on_focus_gained = loaded.config.ui.redraw_on_focus_gained;
             *draw_host_cursor = should_draw_host_cursor(loaded.config.ui.host_cursor);
-            #[cfg(unix)]
-            {
-                *remote_image_paste_key = loaded_remote_image_paste_key;
-            }
+            *remote_image_paste_key = loaded_remote_image_paste_key;
             debug!("reloaded local client config");
         }
         Err(diagnostics) => {
@@ -1790,6 +1824,32 @@ fn sound_from_notify_message(message: &str) -> Option<crate::sound::Sound> {
         "agent attention" => Some(crate::sound::Sound::Request),
         _ => None,
     }
+}
+
+/// Windows analog of `should_bridge_clipboard_image_paste`: the Windows
+/// client receives already-parsed console input events (`StdinEvents`)
+/// rather than raw terminal escape-sequence bytes, so there is no
+/// empty-bracketed-paste "the outer terminal pasted an image" signal to
+/// detect here -- only the explicit configured hotkey.
+///
+/// This fires for both remote and local Windows clients: `image_paste_key` is
+/// only `Some` when clipboard-image bridging applies (see
+/// `client_remote_image_paste_key`), so key presence is a sufficient gate.
+#[cfg(windows)]
+fn should_bridge_clipboard_image_paste_events(
+    events: &[crate::raw_input::RawInputEvent],
+    image_paste_key: Option<(crossterm::event::KeyCode, crossterm::event::KeyModifiers)>,
+) -> bool {
+    let Some(image_paste_key) = image_paste_key else {
+        return false;
+    };
+
+    matches!(
+        events,
+        [crate::raw_input::RawInputEvent::Key(key)]
+            if key.kind == crossterm::event::KeyEventKind::Press
+                && crate::config::terminal_key_matches_combo(*key, image_paste_key)
+    )
 }
 
 #[cfg(unix)]
@@ -2255,6 +2315,69 @@ mod tests {
             true,
             Some(ctrl_v)
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn clipboard_image_paste_bridge_events_triggers_on_configured_key() {
+        let ctrl_v = crate::config::parse_key_combo("ctrl+v").unwrap();
+        let ctrl_v_key = || {
+            crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Char('v'),
+                crossterm::event::KeyModifiers::CONTROL,
+            ))
+        };
+        let ctrl_v_release = || {
+            crate::raw_input::RawInputEvent::Key(
+                crate::input::TerminalKey::new(
+                    crossterm::event::KeyCode::Char('v'),
+                    crossterm::event::KeyModifiers::CONTROL,
+                )
+                .with_kind(crossterm::event::KeyEventKind::Release),
+            )
+        };
+        let other_key = || {
+            crate::raw_input::RawInputEvent::Key(crate::input::TerminalKey::new(
+                crossterm::event::KeyCode::Char('x'),
+                crossterm::event::KeyModifiers::NONE,
+            ))
+        };
+
+        assert!(should_bridge_clipboard_image_paste_events(
+            &[ctrl_v_key()],
+            Some(ctrl_v)
+        ));
+        assert!(!should_bridge_clipboard_image_paste_events(
+            &[ctrl_v_key()],
+            None
+        ));
+        assert!(!should_bridge_clipboard_image_paste_events(
+            &[ctrl_v_release()],
+            Some(ctrl_v)
+        ));
+        assert!(!should_bridge_clipboard_image_paste_events(
+            &[other_key()],
+            Some(ctrl_v)
+        ));
+        assert!(!should_bridge_clipboard_image_paste_events(
+            &[ctrl_v_key(), other_key()],
+            Some(ctrl_v)
+        ));
+    }
+
+    // On Windows, a local (non-remote) client still gets the clipboard-image
+    // paste hotkey so images can be bridged to a local agent that cannot read
+    // the Windows clipboard image itself.
+    #[cfg(windows)]
+    #[test]
+    fn local_windows_client_enables_clipboard_image_paste_key() {
+        let _env = EnvVarsRemovedGuard::new(&[crate::remote::REMOTE_KEYBINDINGS_ENV_VAR]);
+        assert!(!is_remote_client_process());
+        let config = crate::config::Config::default();
+        assert_eq!(
+            client_remote_image_paste_key(&config),
+            crate::config::parse_key_combo("ctrl+v")
+        );
     }
 
     #[cfg(unix)]
@@ -2769,14 +2892,12 @@ mod tests {
         let mut sound_config = crate::config::SoundConfig::default();
         let mut redraw_on_focus_gained = true;
         let mut draw_host_cursor = false;
-        #[cfg(unix)]
         let mut remote_image_paste_key = None;
 
         reload_local_client_config(
             &mut sound_config,
             &mut redraw_on_focus_gained,
             &mut draw_host_cursor,
-            #[cfg(unix)]
             &mut remote_image_paste_key,
         );
 

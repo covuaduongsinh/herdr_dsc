@@ -43,7 +43,7 @@ pub(crate) struct PlatformCapabilities {
 pub(crate) const fn capabilities() -> PlatformCapabilities {
     PlatformCapabilities {
         live_handoff: cfg!(unix),
-        remote_attach: cfg!(unix),
+        remote_attach: cfg!(any(unix, windows)),
         direct_terminal_attach: cfg!(unix),
     }
 }

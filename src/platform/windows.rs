@@ -15,7 +15,10 @@ use windows_sys::{
         },
         System::{
             Console::GetConsoleWindow,
-            DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData},
+            DataExchange::{
+                CloseClipboard, EmptyClipboard, GetClipboardData, IsClipboardFormatAvailable,
+                OpenClipboard, SetClipboardData,
+            },
             Diagnostics::{
                 Debug::ReadProcessMemory,
                 ToolHelp::{
@@ -24,8 +27,8 @@ use windows_sys::{
                 },
             },
             JobObjects::IsProcessInJob,
-            Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE},
-            Ole::CF_UNICODETEXT,
+            Memory::{GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE},
+            Ole::{CF_DIB, CF_DIBV5, CF_UNICODETEXT},
             Threading::{
                 GetCurrentProcess, GetExitCodeProcess, OpenProcess, TerminateProcess,
                 DETACHED_PROCESS, PROCESS_BASIC_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -526,10 +529,212 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
     }
 }
 
-// Windows does not wire clipboard-image bridging into semantic input yet.
 #[cfg_attr(windows, allow(dead_code))]
 pub fn read_clipboard_image() -> Option<ClipboardImage> {
-    None
+    unsafe {
+        if OpenClipboard(null_mut()) == 0 {
+            return None;
+        }
+        let _clipboard = ClipboardGuard;
+
+        let format = if IsClipboardFormatAvailable(CF_DIBV5 as u32) != 0 {
+            CF_DIBV5
+        } else if IsClipboardFormatAvailable(CF_DIB as u32) != 0 {
+            CF_DIB
+        } else {
+            return None;
+        };
+
+        let handle = GetClipboardData(format as u32);
+        if handle.is_null() {
+            return None;
+        }
+
+        let size = GlobalSize(handle);
+        if size == 0 {
+            return None;
+        }
+
+        let ptr = GlobalLock(handle);
+        if ptr.is_null() {
+            return None;
+        }
+        let dib = std::slice::from_raw_parts(ptr.cast::<u8>(), size).to_vec();
+        GlobalUnlock(handle);
+
+        let png = dib_to_png(&dib)?;
+        if png.len() > crate::protocol::MAX_CLIPBOARD_IMAGE_PAYLOAD {
+            return None;
+        }
+        Some(ClipboardImage {
+            bytes: png,
+            extension: "png",
+        })
+    }
+}
+
+const BI_RGB: u32 = 0;
+const BI_BITFIELDS: u32 = 3;
+const MAX_DIB_DIMENSION: usize = 30_000;
+const MAX_DIB_PIXELS_BYTES: u64 = 256 * 1024 * 1024;
+
+fn dib_to_png(dib: &[u8]) -> Option<Vec<u8>> {
+    if dib.len() < 40 {
+        return None;
+    }
+
+    let bi_size = u32::from_le_bytes(dib[0..4].try_into().ok()?);
+    if bi_size < 40 {
+        return None;
+    }
+    let width_raw = i32::from_le_bytes(dib[4..8].try_into().ok()?);
+    let height_raw = i32::from_le_bytes(dib[8..12].try_into().ok()?);
+    let bit_count = u16::from_le_bytes(dib[14..16].try_into().ok()?);
+    let compression = u32::from_le_bytes(dib[16..20].try_into().ok()?);
+    let clr_used = u32::from_le_bytes(dib[32..36].try_into().ok()?);
+
+    if width_raw <= 0 {
+        return None;
+    }
+    let width = width_raw as usize;
+    let bottom_up = height_raw > 0;
+    let height = if height_raw == i32::MIN {
+        return None;
+    } else {
+        height_raw.checked_abs()? as usize
+    };
+    if width == 0 || height == 0 {
+        return None;
+    }
+    if width > MAX_DIB_DIMENSION || height > MAX_DIB_DIMENSION {
+        return None;
+    }
+    let pixel_area = (width as u64).checked_mul(height as u64)?;
+    if pixel_area.checked_mul(4)? > MAX_DIB_PIXELS_BYTES {
+        return None;
+    }
+
+    let (bytes_per_pixel, standard_bitfields) = match (bit_count, compression) {
+        (24, BI_RGB) => (3usize, false),
+        (32, BI_RGB) => (4usize, false),
+        (32, BI_BITFIELDS) => (4usize, true),
+        _ => return None,
+    };
+
+    let palette_bytes: usize = if bit_count <= 8 {
+        let entries = if clr_used != 0 {
+            clr_used as usize
+        } else {
+            1usize << bit_count
+        };
+        entries.checked_mul(4)?
+    } else {
+        0
+    };
+
+    let bi_size = bi_size as usize;
+    let row_bits = (bit_count as usize).checked_mul(width)?;
+    let stride = (row_bits.checked_add(31)? / 32).checked_mul(4)?;
+    let expected_pixel_bytes = stride.checked_mul(height)?;
+
+    let mask_bytes: usize = if standard_bitfields {
+        // The standard BGRA mask triple is always readable at a fixed
+        // offset of 40 bytes from the header start: the legacy 40-byte
+        // BITMAPINFOHEADER has an external RGBQUAD triple starting there,
+        // and BITMAPV4HEADER/V5HEADER (biSize 108/124) embed the same
+        // three masks as struct fields at that same offset.
+        let masks_start = 40usize;
+        if dib.len() < masks_start + 12 {
+            return None;
+        }
+        let r_mask = u32::from_le_bytes(dib[masks_start..masks_start + 4].try_into().ok()?);
+        let g_mask = u32::from_le_bytes(dib[masks_start + 4..masks_start + 8].try_into().ok()?);
+        let b_mask = u32::from_le_bytes(dib[masks_start + 8..masks_start + 12].try_into().ok()?);
+        if r_mask != 0x00FF_0000 || g_mask != 0x0000_FF00 || b_mask != 0x0000_00FF {
+            return None;
+        }
+
+        if bi_size == 40 {
+            // A 40-byte header never embeds masks itself; the external
+            // RGBQUAD triple is mandatory here.
+            12
+        } else {
+            // BITMAPV4HEADER/V5HEADER already embed the masks, so no extra
+            // bytes are needed in principle -- but real-world producers
+            // (observed: .NET's `Clipboard.SetImage`) sometimes still emit
+            // a redundant legacy-style 12-byte mask triple between the
+            // full header and the pixel array anyway. Detect which layout
+            // this buffer actually uses by checking which offset makes the
+            // remaining bytes match the expected pixel array size exactly,
+            // rather than assuming one or the other from header size alone.
+            let base = bi_size.checked_add(palette_bytes)?;
+            let without_extra = base.checked_add(expected_pixel_bytes)?;
+            let with_extra = base.checked_add(12)?.checked_add(expected_pixel_bytes)?;
+            if with_extra == dib.len() {
+                12
+            } else if without_extra == dib.len() {
+                0
+            } else if dib.len() >= with_extra {
+                // Neither fits exactly (there may be trailing profile data
+                // etc.) -- prefer the layout observed in practice.
+                12
+            } else {
+                0
+            }
+        }
+    } else {
+        0
+    };
+
+    let pixel_start = bi_size
+        .checked_add(mask_bytes)?
+        .checked_add(palette_bytes)?;
+    let needed = pixel_start.checked_add(expected_pixel_bytes)?;
+    if dib.len() < needed {
+        return None;
+    }
+
+    let mut rgba = vec![0u8; width.checked_mul(height)?.checked_mul(4)?];
+    let mut alpha_accum: u8 = 0;
+
+    for out_y in 0..height {
+        let src_y = if bottom_up { height - 1 - out_y } else { out_y };
+        let row_start = pixel_start + src_y * stride;
+        let row = &dib[row_start..row_start + width * bytes_per_pixel];
+        let out_row_start = out_y * width * 4;
+
+        for x in 0..width {
+            let src = &row[x * bytes_per_pixel..x * bytes_per_pixel + bytes_per_pixel];
+            let (b, g, r) = (src[0], src[1], src[2]);
+            let a = if bytes_per_pixel == 4 { src[3] } else { 255 };
+            alpha_accum |= a;
+
+            let out_idx = out_row_start + x * 4;
+            rgba[out_idx] = r;
+            rgba[out_idx + 1] = g;
+            rgba[out_idx + 2] = b;
+            rgba[out_idx + 3] = a;
+        }
+    }
+
+    // Many 32bpp DIBs from screenshots leave alpha as zero/garbage; treat an
+    // all-zero accumulated alpha (or BI_RGB, which has no defined alpha
+    // channel) as "opaque" rather than fully transparent.
+    if bytes_per_pixel == 4 && (compression == BI_RGB || alpha_accum == 0) {
+        for pixel in rgba.chunks_exact_mut(4) {
+            pixel[3] = 255;
+        }
+    }
+
+    let mut out = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut out, width as u32, height as u32);
+        encoder.set_color(png::ColorType::Rgba);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().ok()?;
+        writer.write_image_data(&rgba).ok()?;
+    }
+    Some(out)
 }
 
 pub fn show_desktop_notification(_title: &str, _body: Option<&str>) -> std::io::Result<bool> {
@@ -1023,6 +1228,215 @@ mod tests {
             argv,
             vec!["notepad.exe".to_string(), path.display().to_string()]
         );
+    }
+
+    fn dib_header(width: i32, height: i32, bit_count: u16, compression: u32) -> [u8; 40] {
+        let mut header = [0u8; 40];
+        header[0..4].copy_from_slice(&40u32.to_le_bytes());
+        header[4..8].copy_from_slice(&width.to_le_bytes());
+        header[8..12].copy_from_slice(&height.to_le_bytes());
+        header[12..14].copy_from_slice(&1u16.to_le_bytes()); // biPlanes
+        header[14..16].copy_from_slice(&bit_count.to_le_bytes());
+        header[16..20].copy_from_slice(&compression.to_le_bytes());
+        header
+    }
+
+    fn decode_png(bytes: &[u8]) -> (u32, u32, Vec<u8>) {
+        let decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        let mut reader = decoder.read_info().expect("decode png header");
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).expect("decode png frame");
+        buf.truncate(info.buffer_size());
+        (info.width, info.height, buf)
+    }
+
+    #[test]
+    fn dib_to_png_bottom_up_32bpp_zero_alpha_forces_opaque() {
+        let mut dib = dib_header(2, 2, 32, super::BI_RGB).to_vec();
+        // Bottom-up: first row in memory is the bottom (visual) row.
+        // Bottom row (memory row 0): red, green
+        dib.extend_from_slice(&[0, 0, 255, 0]); // B,G,R,A = red, alpha 0
+        dib.extend_from_slice(&[0, 255, 0, 0]); // green, alpha 0
+                                                // Top row (memory row 1): blue, white
+        dib.extend_from_slice(&[255, 0, 0, 0]); // blue, alpha 0
+        dib.extend_from_slice(&[255, 255, 255, 0]); // white, alpha 0
+
+        let png_bytes = super::dib_to_png(&dib).expect("valid 32bpp dib");
+        let (width, height, pixels) = decode_png(&png_bytes);
+        assert_eq!((width, height), (2, 2));
+
+        // Visual row 0 (top of image) must be the top memory row: blue, white.
+        assert_eq!(&pixels[0..4], &[0, 0, 255, 255]);
+        assert_eq!(&pixels[4..8], &[255, 255, 255, 255]);
+        // Visual row 1 (bottom of image): red, green.
+        assert_eq!(&pixels[8..12], &[255, 0, 0, 255]);
+        assert_eq!(&pixels[12..16], &[0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn dib_to_png_24bpp_with_row_padding() {
+        let mut dib = dib_header(2, 2, 24, super::BI_RGB).to_vec();
+        // stride = ((24*2+31)/32)*4 = 8, so each 6-byte row has 2 padding bytes.
+        // Bottom-up, memory row 0 = bottom visual row.
+        dib.extend_from_slice(&[0, 0, 255, 0, 255, 0, 0xAA, 0xBB]); // red, green + padding
+        dib.extend_from_slice(&[255, 0, 0, 255, 255, 255, 0xCC, 0xDD]); // blue, white + padding
+
+        let png_bytes = super::dib_to_png(&dib).expect("valid 24bpp dib");
+        let (width, height, pixels) = decode_png(&png_bytes);
+        assert_eq!((width, height), (2, 2));
+
+        assert_eq!(&pixels[0..4], &[0, 0, 255, 255]);
+        assert_eq!(&pixels[4..8], &[255, 255, 255, 255]);
+        assert_eq!(&pixels[8..12], &[255, 0, 0, 255]);
+        assert_eq!(&pixels[12..16], &[0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn dib_to_png_top_down_negative_height_no_flip() {
+        let mut dib = dib_header(2, -2, 32, super::BI_RGB).to_vec();
+        // Top-down: memory row 0 is the visual top row.
+        dib.extend_from_slice(&[0, 0, 255, 0]); // red
+        dib.extend_from_slice(&[0, 255, 0, 0]); // green
+        dib.extend_from_slice(&[255, 0, 0, 0]); // blue
+        dib.extend_from_slice(&[255, 255, 255, 0]); // white
+
+        let png_bytes = super::dib_to_png(&dib).expect("valid top-down dib");
+        let (_, _, pixels) = decode_png(&png_bytes);
+
+        assert_eq!(&pixels[0..4], &[255, 0, 0, 255]); // red
+        assert_eq!(&pixels[4..8], &[0, 255, 0, 255]); // green
+        assert_eq!(&pixels[8..12], &[0, 0, 255, 255]); // blue
+        assert_eq!(&pixels[12..16], &[255, 255, 255, 255]); // white
+    }
+
+    #[test]
+    fn dib_to_png_preserves_genuine_alpha() {
+        // BI_RGB has no defined alpha channel, so genuine (non-zero) alpha is
+        // only meaningful with BI_BITFIELDS and standard BGRA masks.
+        let mut dib = dib_header(1, 1, 32, super::BI_BITFIELDS).to_vec();
+        dib.extend_from_slice(&0x00FF_0000u32.to_le_bytes()); // R mask
+        dib.extend_from_slice(&0x0000_FF00u32.to_le_bytes()); // G mask
+        dib.extend_from_slice(&0x0000_00FFu32.to_le_bytes()); // B mask
+        dib.extend_from_slice(&[0, 0, 255, 128]); // red, alpha 128
+
+        let png_bytes = super::dib_to_png(&dib).expect("valid dib with alpha");
+        let (_, _, pixels) = decode_png(&png_bytes);
+        assert_eq!(&pixels[0..4], &[255, 0, 0, 128]);
+    }
+
+    /// Builds a BITMAPV5HEADER-sized (124-byte) header with the standard
+    /// BGRA masks embedded at their struct offset (40), as V4/V5 headers do.
+    fn v5_header(width: i32, height: i32, bit_count: u16, compression: u32) -> Vec<u8> {
+        let mut header = vec![0u8; 124];
+        header[0..4].copy_from_slice(&124u32.to_le_bytes());
+        header[4..8].copy_from_slice(&width.to_le_bytes());
+        header[8..12].copy_from_slice(&height.to_le_bytes());
+        header[12..14].copy_from_slice(&1u16.to_le_bytes());
+        header[14..16].copy_from_slice(&bit_count.to_le_bytes());
+        header[16..20].copy_from_slice(&compression.to_le_bytes());
+        header[40..44].copy_from_slice(&0x00FF_0000u32.to_le_bytes());
+        header[44..48].copy_from_slice(&0x0000_FF00u32.to_le_bytes());
+        header[48..52].copy_from_slice(&0x0000_00FFu32.to_le_bytes());
+        header
+    }
+
+    #[test]
+    fn dib_to_png_v5_header_with_redundant_external_mask_table() {
+        // Real-world quirk (observed from .NET's `Clipboard.SetImage`): some
+        // producers emit a BITMAPV5HEADER (which already embeds the color
+        // masks as struct fields) but *also* append a redundant legacy-style
+        // 12-byte RGBQUAD mask triple before the pixel array, exactly like a
+        // 40-byte BITMAPINFOHEADER would require. Confirms the buffer-size
+        // based detection in `dib_to_png` picks the right pixel offset.
+        let mut dib = v5_header(1, 1, 32, super::BI_BITFIELDS);
+        dib.extend_from_slice(&0x00FF_0000u32.to_le_bytes()); // redundant R mask
+        dib.extend_from_slice(&0x0000_FF00u32.to_le_bytes()); // redundant G mask
+        dib.extend_from_slice(&0x0000_00FFu32.to_le_bytes()); // redundant B mask
+        dib.extend_from_slice(&[0, 0, 255, 128]); // red, alpha 128
+
+        let png_bytes = super::dib_to_png(&dib).expect("valid v5 dib with redundant mask table");
+        let (_, _, pixels) = decode_png(&png_bytes);
+        assert_eq!(&pixels[0..4], &[255, 0, 0, 128]);
+    }
+
+    #[test]
+    fn dib_to_png_v5_header_without_redundant_mask_table() {
+        // The spec-compliant layout: BITMAPV5HEADER's embedded masks are
+        // used and the pixel array follows the header immediately.
+        let mut dib = v5_header(1, 1, 32, super::BI_BITFIELDS);
+        dib.extend_from_slice(&[0, 0, 255, 128]); // red, alpha 128
+
+        let png_bytes = super::dib_to_png(&dib).expect("valid v5 dib without redundant mask table");
+        let (_, _, pixels) = decode_png(&png_bytes);
+        assert_eq!(&pixels[0..4], &[255, 0, 0, 128]);
+    }
+
+    #[test]
+    fn dib_to_png_rejects_indexed_color() {
+        let dib = dib_header(2, 2, 8, super::BI_RGB).to_vec();
+        assert!(super::dib_to_png(&dib).is_none());
+    }
+
+    #[test]
+    fn dib_to_png_rejects_truncated_buffer() {
+        let mut dib = dib_header(4, 4, 32, super::BI_RGB).to_vec();
+        dib.extend_from_slice(&[0u8; 8]); // way short of the 4*4*4 = 64 bytes needed
+        assert!(super::dib_to_png(&dib).is_none());
+    }
+
+    #[test]
+    fn dib_to_png_rejects_unsupported_bit_depth() {
+        let dib = dib_header(2, 2, 16, super::BI_RGB).to_vec();
+        assert!(super::dib_to_png(&dib).is_none());
+    }
+
+    /// Exercises the REAL Win32 clipboard path end-to-end (OpenClipboard,
+    /// IsClipboardFormatAvailable, GetClipboardData, GlobalLock/GlobalSize),
+    /// not synthetic DIB bytes. Requires a real image to already be on the
+    /// Windows clipboard (e.g. via `[System.Windows.Forms.Clipboard]::SetImage`
+    /// in PowerShell before running). Ignored by default since it depends on
+    /// external clipboard state and is not headless-CI-safe.
+    #[test]
+    #[ignore]
+    fn read_clipboard_image_reads_real_clipboard_4x3_test_bitmap() {
+        let image = super::read_clipboard_image().expect(
+            "expected an image on the clipboard -- set one first, e.g. via \
+             PowerShell [System.Windows.Forms.Clipboard]::SetImage(...)",
+        );
+        assert_eq!(image.extension, "png");
+
+        let decoder = png::Decoder::new(std::io::Cursor::new(&image.bytes));
+        let mut reader = decoder
+            .read_info()
+            .expect("decode real clipboard png header");
+        assert_eq!(reader.info().width, 4);
+        assert_eq!(reader.info().height, 3);
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader
+            .next_frame(&mut buf)
+            .expect("decode real clipboard png frame");
+        buf.truncate(info.buffer_size());
+
+        let pixel = |x: usize, y: usize| -> [u8; 4] {
+            let idx = (y * 4 + x) * 4;
+            [buf[idx], buf[idx + 1], buf[idx + 2], buf[idx + 3]]
+        };
+        assert_eq!(pixel(0, 0), [255, 0, 0, 255], "top-left should be red");
+        assert_eq!(pixel(1, 0), [0, 255, 0, 255], "should be green");
+        assert_eq!(pixel(2, 0), [0, 0, 255, 255], "should be blue");
+        assert_eq!(pixel(3, 0), [255, 255, 0, 255], "should be yellow");
+        assert_eq!(pixel(0, 1), [255, 0, 255, 255], "should be magenta");
+        assert_eq!(pixel(1, 1), [0, 255, 255, 255], "should be cyan");
+        assert_eq!(pixel(2, 1), [255, 255, 255, 255], "should be white");
+        assert_eq!(pixel(3, 1), [0, 0, 0, 255], "should be black");
+        assert_eq!(pixel(0, 2), [128, 128, 128, 255], "should be gray");
+        assert_eq!(pixel(1, 2), [64, 32, 16, 255]);
+        assert_eq!(pixel(2, 2), [10, 20, 30, 255]);
+        assert_eq!(pixel(3, 2), [200, 150, 100, 255]);
+
+        let out_path = std::env::temp_dir().join("herdr-clipboard-test-output.png");
+        std::fs::write(&out_path, &image.bytes).expect("write decoded clipboard png to disk");
+        eprintln!("wrote real clipboard capture to {}", out_path.display());
     }
 
     fn test_entry(
