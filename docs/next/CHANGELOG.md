@@ -14,6 +14,7 @@
 
 ### Fixed
 - Linux sound notifications now terminate and reap audio players that do not exit, preventing unavailable audio from leaving CPU-bound `mpg123` processes behind. (#1622)
+- Oversized bracketed text pastes are now rejected with a client-local notification instead of disconnecting the client. (#1665)
 - Agent prompt waits now report `agent_prompt_stalled` after five seconds without an observed state change instead of waiting indefinitely after an ineffective submission.
 - `herdr config check` now reports unknown config keys with their full paths instead of treating ignored typos as valid configuration. (#1573)
 - Codex panes with customized static terminal titles now fall back to the live working footer instead of remaining idle, while OSC activity remains preferred. (#1563)
